@@ -294,8 +294,8 @@ impl Interpreter {
 
     /// How many bytes `append_expansion_for_word` will append for `value`,
     /// counted before anything is allocated so the budget is charged first.
-    fn expansion_appended_len(word: &Word, idx: usize, value: &str) -> usize {
-        if word.has_unquoted_glob && Self::part_is_quoted(word, idx) {
+    fn expansion_appended_len(word: &Word, part_quoted: bool, value: &str) -> usize {
+        if word.has_unquoted_glob && part_quoted {
             value
                 .chars()
                 .map(|ch| ch.len_utf8() + usize::from(Self::needs_glob_escape(ch)))
@@ -308,10 +308,10 @@ impl Interpreter {
     pub(super) fn append_expansion_for_word(
         result: &mut String,
         word: &Word,
-        idx: usize,
+        part_quoted: bool,
         value: &str,
     ) {
-        if word.has_unquoted_glob && Self::part_is_quoted(word, idx) {
+        if word.has_unquoted_glob && part_quoted {
             result.push_str(&Self::quote_expansion_for_quoted_glob(value));
         } else {
             result.push_str(value);
@@ -351,7 +351,15 @@ impl Interpreter {
         // been consumed; sibling substitutions otherwise evade live-byte caps.
         let mut substitution_leases = Vec::new();
 
+        // Check the metadata once: many unquoted expansions before a quoted
+        // suffix must not rescan the whole word for every output append.
+        let has_part_quotes = word.part_quoted.iter().any(|q| *q);
         for (idx, part) in word.parts.iter().enumerate() {
+            let part_quoted = if has_part_quotes {
+                word.part_quoted.get(idx).copied().unwrap_or(false)
+            } else {
+                word.quoted
+            };
             match part {
                 WordPart::BadSubstitution(text) => {
                     return Err(crate::error::Error::LineAbort(
@@ -374,7 +382,7 @@ impl Interpreter {
                 WordPart::Literal(s) => {
                     // Tilde expansion (`~`, `~/x`, `x=~:~`); quoted literals
                     // keep their tilde.
-                    match (!Self::part_is_quoted(word, idx) && s.contains('~'))
+                    match (!part_quoted && s.contains('~'))
                         .then(|| self.tilde_expand_word_literal(word, idx, s))
                         .flatten()
                     {
@@ -386,7 +394,7 @@ impl Interpreter {
                     if self.is_nounset() && !self.is_variable_set(name) {
                         self.nounset_error = Some(self.unbound_variable_diag(name));
                     }
-                    if name == "*" && Self::part_is_quoted(word, idx) {
+                    if name == "*" && part_quoted {
                         let positional = self
                             .call_stack
                             .last()
@@ -403,14 +411,14 @@ impl Interpreter {
                         Self::append_expansion_for_word(
                             &mut result,
                             word,
-                            idx,
+                            part_quoted,
                             &positional.join(&sep),
                         );
                     } else {
                         Self::append_expansion_for_word(
                             &mut result,
                             word,
-                            idx,
+                            part_quoted,
                             &self.expand_variable(name),
                         );
                     }
@@ -425,9 +433,9 @@ impl Interpreter {
                     // THREAT[TM-DOS-089]: Delegate to Box::pin-ed helper to
                     // prevent stack growth proportional to nesting depth.
                     let trimmed = self.execute_cmd_subst(commands).await?;
-                    let appended_bytes = Self::expansion_appended_len(word, idx, &trimmed);
+                    let appended_bytes = Self::expansion_appended_len(word, part_quoted, &trimmed);
                     substitution_leases.push(self.execution_budget.lease_bytes(appended_bytes)?);
-                    Self::append_expansion_for_word(&mut result, word, idx, &trimmed);
+                    Self::append_expansion_for_word(&mut result, word, part_quoted, &trimmed);
                 }
                 WordPart::ArithmeticExpansion(expr) => {
                     let expanded_expr = if expr.contains("$(") || expr.contains('`') {
@@ -439,7 +447,12 @@ impl Interpreter {
                     let value = self
                         .try_evaluate_arithmetic_with_assign(&expanded_expr)
                         .map_err(|msg| crate::error::Error::LineAbort(self.arith_diag("", &msg)))?;
-                    Self::append_expansion_for_word(&mut result, word, idx, &value.to_string());
+                    Self::append_expansion_for_word(
+                        &mut result,
+                        word,
+                        part_quoted,
+                        &value.to_string(),
+                    );
                 }
                 WordPart::Length(name) => {
                     let value = if let Some(bracket_pos) = name.find('[') {
@@ -523,7 +536,7 @@ impl Interpreter {
                     // Delegate to sync helper to avoid bloating the async state
                     // machine with Vec<String> locals (causes stack overflow at
                     // depth 32 in debug builds — see stack_overflow_regression_tests).
-                    self.operand_outer_unquoted = !Self::part_is_quoted(word, idx);
+                    self.operand_outer_unquoted = !part_quoted;
                     let colon_variant = self.star_colon_variant(
                         name,
                         &value,
@@ -539,7 +552,7 @@ impl Interpreter {
                         is_set,
                     );
                     self.operand_outer_unquoted = false;
-                    Self::append_expansion_for_word(&mut result, word, idx, &expanded);
+                    Self::append_expansion_for_word(&mut result, word, part_quoted, &expanded);
                 }
                 WordPart::ArrayAccess { name, index } => {
                     // `${a[$(cmd)]}` in the source: the substitution runs
@@ -558,7 +571,7 @@ impl Interpreter {
                     } else {
                         self.expand_array_access_part(name, index)
                     };
-                    Self::append_expansion_for_word(&mut result, word, idx, &value);
+                    Self::append_expansion_for_word(&mut result, word, part_quoted, &value);
                 }
                 WordPart::ArrayIndices { name, star } => {
                     let keys = self.array_keys(name);
@@ -567,7 +580,12 @@ impl Interpreter {
                     } else {
                         " ".to_string()
                     };
-                    Self::append_expansion_for_word(&mut result, word, idx, &keys.join(&sep));
+                    Self::append_expansion_for_word(
+                        &mut result,
+                        word,
+                        part_quoted,
+                        &keys.join(&sep),
+                    );
                 }
                 WordPart::Substring {
                     name,
@@ -578,7 +596,7 @@ impl Interpreter {
                     let value = self
                         .substring_part(name, offset, length.as_deref())
                         .map_err(crate::error::Error::LineAbort)?;
-                    Self::append_expansion_for_word(&mut result, word, idx, &value);
+                    Self::append_expansion_for_word(&mut result, word, part_quoted, &value);
                 }
                 WordPart::IndirectExpansion {
                     name,
@@ -593,7 +611,7 @@ impl Interpreter {
                         // Nameref without operator: ${!ref} is the name
                         // at the end of the nameref chain.
                         let target = self.resolve_nameref(name).to_string();
-                        Self::append_expansion_for_word(&mut result, word, idx, &target);
+                        Self::append_expansion_for_word(&mut result, word, part_quoted, &target);
                     } else {
                         // Resolve the indirect target variable name
                         let resolved_name = if let Some(target) = nameref_target {
@@ -614,16 +632,31 @@ impl Interpreter {
                                 *colon_variant,
                                 is_set,
                             );
-                            Self::append_expansion_for_word(&mut result, word, idx, &expanded);
+                            Self::append_expansion_for_word(
+                                &mut result,
+                                word,
+                                part_quoted,
+                                &expanded,
+                            );
                         } else {
                             // Plain indirect expansion (no operator)
                             if let Some(arr) = self.scoped.arrays.get(&resolved_name) {
                                 if let Some(first) = arr.get(&0) {
-                                    Self::append_expansion_for_word(&mut result, word, idx, first);
+                                    Self::append_expansion_for_word(
+                                        &mut result,
+                                        word,
+                                        part_quoted,
+                                        first,
+                                    );
                                 }
                             } else {
                                 let value = self.expand_variable(&resolved_name);
-                                Self::append_expansion_for_word(&mut result, word, idx, &value);
+                                Self::append_expansion_for_word(
+                                    &mut result,
+                                    word,
+                                    part_quoted,
+                                    &value,
+                                );
                             }
                         }
                     }
@@ -641,7 +674,12 @@ impl Interpreter {
                     } else {
                         " ".to_string()
                     };
-                    Self::append_expansion_for_word(&mut result, word, idx, &names.join(&sep));
+                    Self::append_expansion_for_word(
+                        &mut result,
+                        word,
+                        part_quoted,
+                        &names.join(&sep),
+                    );
                 }
                 WordPart::ArrayLength(name) => {
                     let resolved = self.resolve_nameref(name);
@@ -658,14 +696,14 @@ impl Interpreter {
                     let expanded = self
                         .expand_process_substitution(commands, *is_input)
                         .await?;
-                    Self::append_expansion_for_word(&mut result, word, idx, &expanded);
+                    Self::append_expansion_for_word(&mut result, word, part_quoted, &expanded);
                 }
                 WordPart::Transformation { name, operator } => {
                     let value = match prompts.as_mut().and_then(Vec::pop) {
                         Some(decoded) if *operator == 'P' => decoded,
                         _ => self.transformation_part(name, *operator),
                     };
-                    Self::append_expansion_for_word(&mut result, word, idx, &value);
+                    Self::append_expansion_for_word(&mut result, word, part_quoted, &value);
                 }
             }
         }
@@ -3679,9 +3717,18 @@ mod expansion_charge_tests {
                     for idx in 0..2 {
                         for value in values {
                             let mut appended = String::new();
-                            Interpreter::append_expansion_for_word(&mut appended, &w, idx, value);
+                            Interpreter::append_expansion_for_word(
+                                &mut appended,
+                                &w,
+                                Interpreter::part_is_quoted(&w, idx),
+                                value,
+                            );
                             assert_eq!(
-                                Interpreter::expansion_appended_len(&w, idx, value),
+                                Interpreter::expansion_appended_len(
+                                    &w,
+                                    Interpreter::part_is_quoted(&w, idx),
+                                    value
+                                ),
                                 appended.len(),
                                 "charge != appended for {value:?} \
                          (quoted={quoted}, has_unquoted_glob={has_unquoted_glob})"
