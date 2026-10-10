@@ -2525,7 +2525,10 @@ impl<'a> Lexer<'a> {
             // Sentinel pairs are indivisible; escaped NUL/marker bytes stay data.
             if ch == '\x00'
                 && let Some(&next) = char_vec.get(i + 1)
-                && matches!(next, '\x00' | QUOTED_SEGMENT_START | QUOTED_SEGMENT_END)
+                && matches!(
+                    next,
+                    '\x00' | '$' | QUOTED_SEGMENT_START | QUOTED_SEGMENT_END
+                )
             {
                 result.push(ch);
                 result.push(next);
@@ -2541,8 +2544,7 @@ impl<'a> Lexer<'a> {
             }
             let in_quoted = marked_quoted;
             if in_quoted {
-                if expansion_stack.is_empty() && ch == '$' && (i == 0 || char_vec[i - 1] != '\x00')
-                {
+                if expansion_stack.is_empty() && ch == '$' {
                     // Peek at next char to detect ${ or $(
                     if let Some(&next) = char_vec.get(i + 1)
                         && (next == '{' || next == '(')
@@ -2557,7 +2559,6 @@ impl<'a> Lexer<'a> {
                     // name is not a glob character.
                     if let Some(&next) = char_vec.get(i + 1)
                         && matches!(next, '*' | '@' | '?' | '!' | '-')
-                        && (i == 0 || char_vec[i - 1] != '\x00')
                     {
                         result.push(ch);
                         result.push(next);
@@ -3171,6 +3172,11 @@ mod tests {
         assert_eq!(
             Lexer::escape_glob_metas_in_quoted_ranges("*\x00\x1fx", &[(0, 3)]),
             "\x1e\\*\x00\x1f\x1fx"
+        );
+        let quoted = "\x00\x00$(printf '*')";
+        assert_eq!(
+            Lexer::escape_glob_metas_in_quoted_ranges(&format!("{quoted}*"), &[(0, quoted.len())]),
+            format!("\x1e{quoted}\x1f*")
         );
     }
 
