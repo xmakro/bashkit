@@ -29,6 +29,12 @@ normalization storage is reserved against `max_live_intermediate_bytes`
 before allocation. Searches also consume the shared work budget and check
 cancellation and deadlines, including when every candidate is missing.
 
+Indexed compound-array assignments expand values before evaluating subscripts.
+Pending keys, values, fields and container capacity count against
+`max_live_intermediate_bytes`, including repeated writes to the same index.
+Exceeding that budget returns a resource-limit error even when the final array
+would fit the retained-variable budget.
+
 Command hash entries (`hash -p FILE NAME...` and automatic PATH lookups) charge
 each retained name and pathname against the same live-byte budget before copying.
 Entries that survive between executions count toward the next execution's budget.
@@ -54,6 +60,13 @@ input and live intermediate limits and scanned one file at a time. `-q` stops
 at the first match, before further traversal.
 
 ## Threat model
+
+Prompt expansion (`${x@P}` and interactive prompts) shares the execution work,
+aggregate-input, cancellation and deadline budgets. Recursive prompt reparses
+stop at `min(max_ast_depth, 8)` with a resource-limit error, including cycles
+through command substitutions. Raising the AST limit cannot remove this host
+stack protection. Finite prompt expansion and `shopt -u promptvars` retain their
+normal behavior within these limits.
 
 Bashkit maintains a living threat model in [`knowledge/security/threat-model.md`](../knowledge/security/threat-model.md)
 with stable threat IDs across these categories:

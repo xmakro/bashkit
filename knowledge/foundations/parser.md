@@ -67,6 +67,8 @@ when quoted text contains glob syntax or a quoted expansion could produce it:
 `"$prefix"$empty` and `'literal*'$(printf '')` keep the quoted glob literal.
 Expansion escaping and its byte-budget charge use each part's quote flag;
 unquoted expansion output still participates in glob and pattern matching.
+Compound-array expansion uses the same per-part escaping inside a budgeted
+buffer, retaining pending-value capacity leases until subscript evaluation.
 The quote-metadata presence check is cached once per expanded word, avoiding
 quadratic scans when many unquoted expansions precede a quoted suffix.
 The shared marker builder preserves empty quoted spans and ends adjacent

@@ -24,6 +24,9 @@ async fn backticks_after_quotes_match_bash() {
         r#"printf '[%s]\n' '$()*'`printf ''`"#,
         r#"printf '[%s]\n' $'*\x1f'`printf ''`"#,
         r#"v=''; printf '<%s>\n' ''$v "$v"$v"#,
+        r#"v='*'; a=([0]="$v"`printf '?'`); printf '[%s]\n' "${a[@]}""#,
+        r#"a=([0]='*'`printf '1 2'`); printf '[%s]\n' "${a[@]}""#,
+        r#"declare -a a=([0]='*'`printf '?'`); printf '[%s]\n' "${a[@]}""#,
         r#"f() { printf '[%s]\n' 'x'`printf Y`; }; f"#,
     ];
     let host_available = std::process::Command::new("bash")
